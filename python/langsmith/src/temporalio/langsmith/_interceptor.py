@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import random
@@ -26,9 +27,9 @@ import temporalio.workflow
 from temporalio.api.common.v1 import Payload
 from temporalio.exceptions import ApplicationError, ApplicationErrorCategory
 
-# This logger is only used in _log_future_exception, which runs on the
-# executor thread (not the workflow thread).  Never log directly from
-# workflow interceptor code — the sandbox blocks logging I/O.
+# Used by _log_future_exception, which runs on the executor thread, and by
+# _end_run_on_exception outside workflows.  Workflow code logs through
+# temporalio.workflow.logger instead — the sandbox blocks logging I/O here.
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
@@ -446,6 +447,25 @@ def _is_benign_error(exc: Exception) -> bool:
     )
 
 
+def _end_run_on_exception(run_tree: _ReplaySafeRunTree, **kwargs: Any) -> None:
+    """End and patch a run while an exception unwinds, without masking it."""
+    try:
+        run_tree.end(**kwargs)
+        run_tree.patch()
+    except Exception as exc:
+        try:
+            log = (
+                temporalio.workflow.logger
+                if temporalio.workflow.in_workflow()
+                else logger
+            )
+            log.error("LangSmith run finalization error: %s", exc)
+        except Exception:
+            # A failing log handler (e.g. one restricted by the workflow
+            # sandbox) must not replace the exception being raised either.
+            pass
+
+
 @contextmanager
 def _maybe_run(
     client: langsmith.Client,
@@ -470,6 +490,7 @@ def _maybe_run(
       ``tracing_context(parent=run_tree)`` so ``get_current_run_tree()``
       returns it and ``_inject_current_context()`` can inject it.
     - On exception: marks run as errored (unless benign ApplicationError), re-raises.
+    - On continue-as-new or cancellation: ends the run without an error, re-raises.
 
     Note on ``tracing_is_enabled()`` and cross-process traces:
     ``tracing_is_enabled()`` checks for an active run tree in context
@@ -529,9 +550,19 @@ def _maybe_run(
         with tracing_context(parent=run_tree, client=client):
             yield None
     except Exception as exc:
-        if not _is_benign_error(exc):
-            run_tree.end(error=f"{type(exc).__name__}: {exc}")
-            run_tree.patch()
+        if _is_benign_error(exc):
+            _end_run_on_exception(run_tree)
+        else:
+            _end_run_on_exception(run_tree, error=f"{type(exc).__name__}: {exc}")
+        raise
+    except (temporalio.workflow.ContinueAsNewError, asyncio.CancelledError) as exc:
+        # BaseExceptions that end the run without failing it.
+        status = (
+            "continued_as_new"
+            if isinstance(exc, temporalio.workflow.ContinueAsNewError)
+            else "cancelled"
+        )
+        _end_run_on_exception(run_tree, outputs={"status": status})
         raise
     else:
         run_tree.end(outputs={"status": "ok"})

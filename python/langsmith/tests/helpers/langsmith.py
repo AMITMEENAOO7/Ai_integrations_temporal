@@ -51,6 +51,7 @@ class _RunRecord:
     inputs: dict[str, Any]
     outputs: dict[str, Any] | None = None
     error: str | None = None
+    end_time: Any = None
 
 
 class InMemoryRunCollector:
@@ -88,6 +89,8 @@ class InMemoryRunCollector:
             rec.outputs = kwargs["outputs"]
         if "error" in kwargs:
             rec.error = kwargs["error"]
+        if kwargs.get("end_time") is not None:
+            rec.end_time = kwargs["end_time"]
 
     def clear(self) -> None:
         self.runs.clear()

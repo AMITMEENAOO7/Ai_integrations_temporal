@@ -263,6 +263,22 @@ class ActivityFailureWorkflow:
 
 
 @workflow.defn
+class ContinueAsNewWorkflow:
+    @workflow.run
+    async def run(self, iteration: int) -> int:
+        if iteration == 0:
+            workflow.continue_as_new(iteration + 1)
+        return iteration
+
+
+@workflow.defn
+class WaitForeverWorkflow:
+    @workflow.run
+    async def run(self) -> None:
+        await workflow.wait_condition(lambda: False)
+
+
+@workflow.defn
 class BenignErrorWorkflow:
     @workflow.run
     async def run(self) -> str:
@@ -286,6 +302,13 @@ def _make_plugin_and_collector(
     mock_ls_client = make_mock_ls_client(collector)
     plugin = LangSmithPlugin(client=mock_ls_client, **kwargs)
     return plugin, collector, mock_ls_client
+
+
+def _wait_for_tracing_io(plugin: LangSmithPlugin) -> None:
+    """Wait for run updates still queued on the plugin's single-worker executor."""
+    assert plugin.interceptors
+    interceptor: Any = plugin.interceptors[0]
+    interceptor._executor.submit(lambda: None).result()
 
 
 def _make_client_and_collector(
@@ -526,6 +549,74 @@ class TestErrorTracing:
         ]
         assert len(activity_runs) == 1
         assert activity_runs[0].error is None
+        assert activity_runs[0].end_time is not None
+
+    async def test_continue_as_new_ends_run(
+        self,
+        client: Client,
+        env: WorkflowEnvironment,  # type:ignore[reportUnusedParameter]
+    ) -> None:
+        """The run that continues as new is ended without an error."""
+        plugin, collector, _ = _make_plugin_and_collector(add_temporal_runs=True)
+        config = client.config()
+        config["plugins"] = [plugin]
+        temporal_client = Client(**config)
+
+        async with new_worker(
+            temporal_client, ContinueAsNewWorkflow, max_cached_workflows=0
+        ) as worker:
+            result = await temporal_client.execute_workflow(
+                ContinueAsNewWorkflow.run,
+                0,
+                id=f"continue-as-new-{uuid.uuid4()}",
+                task_queue=worker.task_queue,
+            )
+        assert result == 1
+
+        _wait_for_tracing_io(plugin)
+        wf_runs = [
+            r for r in collector.runs if r.name == "RunWorkflow:ContinueAsNewWorkflow"
+        ]
+        assert len(wf_runs) == 2
+        assert all(r.end_time is not None for r in collector.runs)
+        assert all(r.error is None for r in wf_runs)
+        assert [r.outputs for r in wf_runs] == [
+            {"status": "continued_as_new"},
+            {"status": "ok"},
+        ]
+
+    async def test_cancelled_workflow_ends_run(
+        self,
+        client: Client,
+        env: WorkflowEnvironment,  # type:ignore[reportUnusedParameter]
+    ) -> None:
+        """A cancelled workflow's run is ended as cancelled, not left open."""
+        plugin, collector, _ = _make_plugin_and_collector(add_temporal_runs=True)
+        config = client.config()
+        config["plugins"] = [plugin]
+        temporal_client = Client(**config)
+
+        async with new_worker(
+            temporal_client, WaitForeverWorkflow, max_cached_workflows=0
+        ) as worker:
+            handle = await temporal_client.start_workflow(
+                WaitForeverWorkflow.run,
+                id=f"cancelled-{uuid.uuid4()}",
+                task_queue=worker.task_queue,
+            )
+            await handle.describe()
+            await handle.cancel()
+            with pytest.raises(WorkflowFailureError):
+                await handle.result()
+
+        _wait_for_tracing_io(plugin)
+        wf_runs = [
+            r for r in collector.runs if r.name == "RunWorkflow:WaitForeverWorkflow"
+        ]
+        assert len(wf_runs) == 1
+        assert wf_runs[0].end_time is not None
+        assert wf_runs[0].error is None
+        assert wf_runs[0].outputs == {"status": "cancelled"}
 
 
 # ---------------------------------------------------------------------------

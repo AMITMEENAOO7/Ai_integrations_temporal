@@ -11,9 +11,11 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from temporalio.api.common.v1 import Payload
+from temporalio.exceptions import ApplicationError, ApplicationErrorCategory
 from temporalio.langsmith import LangSmithInterceptor
 from temporalio.langsmith._interceptor import (
     HEADER_KEY,
+    _end_run_on_exception,
     _extract_context,
     _inject_context,
     _LangSmithWorkflowInboundInterceptor,
@@ -292,7 +294,7 @@ class TestErrorHandling:
     def test_benign_application_error_not_marked(
         self, _mock_in_wf: Any, MockRunTree: Any
     ) -> None:
-        """Benign ApplicationError does not mark the run as errored."""
+        """Benign ApplicationError ends the run without marking it errored."""
         from temporalio.exceptions import ApplicationError, ApplicationErrorCategory
 
         mock_run = _make_mock_run()
@@ -309,10 +311,8 @@ class TestErrorHandling:
                     "benign",
                     category=ApplicationErrorCategory.BENIGN,
                 )
-        # run.end should NOT have been called with error=
-        end_calls = mock_run.end.call_args_list
-        for c in end_calls:
-            assert "error" not in (c.kwargs or {})
+        mock_run.end.assert_called_once_with()
+        mock_run.patch.assert_called()
 
     @patch(_PATCH_RUNTREE)
     @patch(_PATCH_IN_WORKFLOW, return_value=False)
@@ -364,10 +364,7 @@ class TestErrorHandling:
     def test_cancelled_error_propagates_without_marking_run(
         self, _mock_in_wf: Any, MockRunTree: Any
     ) -> None:
-        """CancelledError (BaseException) propagates without marking run as errored.
-
-        _maybe_run catches Exception only, so CancelledError bypasses error marking.
-        """
+        """CancelledError (BaseException) ends the run as cancelled and propagates."""
         mock_run = _make_mock_run()
         MockRunTree.return_value = mock_run
         mock_client = MagicMock()
@@ -379,10 +376,75 @@ class TestErrorHandling:
                 executor=_make_executor(),
             ):
                 raise asyncio.CancelledError()
-        # run.end should NOT have been called with error=
-        end_calls = mock_run.end.call_args_list
-        for c in end_calls:
-            assert "error" not in (c.kwargs or {})
+        mock_run.end.assert_called_once_with(outputs={"status": "cancelled"})
+        mock_run.patch.assert_called()
+
+    @patch(_PATCH_RUNTREE)
+    @patch(_PATCH_IN_WORKFLOW, return_value=False)
+    def test_continue_as_new_ends_run(self, _mock_in_wf: Any, MockRunTree: Any) -> None:
+        """ContinueAsNewError (BaseException) ends the run without an error."""
+        from temporalio.workflow import ContinueAsNewError
+
+        class _ContinueAsNew(ContinueAsNewError):
+            """The SDK only raises subclasses; direct instantiation is blocked."""
+
+        mock_run = _make_mock_run()
+        MockRunTree.return_value = mock_run
+        with pytest.raises(ContinueAsNewError):
+            with _maybe_run(
+                MagicMock(),
+                "TestRun",
+                add_temporal_runs=True,
+                executor=_make_executor(),
+            ):
+                raise _ContinueAsNew()
+        mock_run.end.assert_called_once_with(outputs={"status": "continued_as_new"})
+        mock_run.patch.assert_called()
+
+    @pytest.mark.parametrize("failing", ["end", "patch"])
+    @pytest.mark.parametrize(
+        "raised",
+        [
+            asyncio.CancelledError(),
+            ApplicationError("benign", category=ApplicationErrorCategory.BENIGN),
+            ApplicationError("bad", non_retryable=True),
+        ],
+        ids=["cancelled", "benign", "error"],
+    )
+    @patch(_PATCH_RUNTREE)
+    @patch(_PATCH_IN_WORKFLOW, return_value=False)
+    def test_finalization_failure_keeps_original_exception(
+        self,
+        _mock_in_wf: Any,
+        MockRunTree: Any,
+        raised: BaseException,
+        failing: str,
+    ) -> None:
+        """A failing end() or patch() does not replace the exception being raised."""
+        mock_run = _make_mock_run()
+        getattr(mock_run, failing).side_effect = RuntimeError("langsmith down")
+        MockRunTree.return_value = mock_run
+        with pytest.raises(type(raised)) as exc_info:
+            with _maybe_run(
+                MagicMock(),
+                "TestRun",
+                add_temporal_runs=True,
+                executor=_make_executor(),
+            ):
+                raise raised
+        assert exc_info.value is raised
+
+    @patch(_PATCH_IN_WORKFLOW, return_value=True)
+    @patch(f"{_MOD}.temporalio.workflow.logger")
+    def test_finalization_log_failure_in_workflow_is_contained(
+        self, mock_wf_logger: Any, _mock_in_wf: Any
+    ) -> None:
+        """In a workflow, the error goes to workflow.logger, and a failing handler is contained."""
+        mock_run = MagicMock()
+        mock_run.end.side_effect = RuntimeError("langsmith down")
+        mock_wf_logger.error.side_effect = RuntimeError("handler failed")
+        _end_run_on_exception(mock_run, outputs={"status": "cancelled"})
+        mock_wf_logger.error.assert_called_once()
 
 
 # ===================================================================
