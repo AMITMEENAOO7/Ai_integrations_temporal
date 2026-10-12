@@ -1,14 +1,14 @@
 """Activity wrappers for executing LangGraph nodes and tasks."""
 
 import asyncio
-from collections.abc import Awaitable
+from collections.abc import Awaitable, Sequence
 from dataclasses import dataclass
 from datetime import timedelta
 from inspect import iscoroutinefunction, signature
 from typing import Any, Callable
 
 from langgraph.errors import GraphInterrupt
-from langgraph.types import Command, Interrupt
+from langgraph.types import Command, Interrupt, Send, TimeoutPolicy
 
 from temporalio import workflow
 from temporalio.contrib.workflow_streams import WorkflowStreamClient
@@ -52,6 +52,61 @@ class ActivityOutput:
     langgraph_interrupts: tuple[Interrupt] | None = None
 
 
+def _command_to_payload(command: Command) -> dict[str, Any]:
+    """Convert a ``Command`` to a dict the data converter can serialize.
+
+    ``Send`` objects in ``goto`` become ``{"node", "arg", "timeout"}`` dicts.
+    """
+
+    def send_to_dict(item: Any) -> Any:
+        if isinstance(item, Send):
+            return {"node": item.node, "arg": item.arg, "timeout": item.timeout}
+        return item
+
+    goto = command.goto
+    if isinstance(goto, Sequence) and not isinstance(goto, str):
+        goto = [send_to_dict(item) for item in goto]
+    else:
+        goto = send_to_dict(goto)
+    return {
+        "graph": command.graph,
+        "update": command.update,
+        "resume": command.resume,
+        "goto": goto,
+    }
+
+
+def _command_from_payload(payload: dict[str, Any]) -> Command:
+    """Rebuild a ``Command`` from ``_command_to_payload`` output.
+
+    Node names are the only other values ``goto`` can hold, so a dict in
+    ``goto`` is always a serialized ``Send``. Payloads written before ``Send``
+    support only hold node names and pass through unchanged.
+    """
+
+    def dict_to_send(item: Any) -> Any:
+        if isinstance(item, dict):
+            timeout = item.get("timeout")
+            return Send(
+                item["node"],
+                item["arg"],
+                timeout=TimeoutPolicy(**timeout) if timeout else None,
+            )
+        return item
+
+    goto = payload["goto"]
+    if isinstance(goto, list):
+        goto = [dict_to_send(item) for item in goto]
+    else:
+        goto = dict_to_send(goto)
+    return Command(
+        graph=payload["graph"],
+        update=payload["update"],
+        resume=payload["resume"],
+        goto=goto,
+    )
+
+
 def wrap_activity(
     func: Callable,
     *,
@@ -90,7 +145,7 @@ def wrap_activity(
                 else:
                     result = await asyncio.to_thread(func, *input.args, **kwargs)
                 if isinstance(result, Command):
-                    return ActivityOutput(langgraph_command=result)
+                    return ActivityOutput(langgraph_command=_command_to_payload(result))
                 return ActivityOutput(result=result)
             except GraphInterrupt as e:
                 return ActivityOutput(langgraph_interrupts=e.args[0])
@@ -149,7 +204,15 @@ def wrap_execute_activity(
             if task_id
             else ""
         )
+        # The cache travels through workflow.continue_as_new(), so a Command is
+        # stored in its payload form under a separate "<key>:command" entry and
+        # rebuilt on lookup. cache_key() returns 32 hex characters, so this
+        # namespace can't collide with a plain result key, and a result dict
+        # is never mistaken for a Command.
         if task_id:
+            found, cached = cache_lookup(f"{key}:command")
+            if found:
+                return _command_from_payload(cached)
             found, cached = cache_lookup(key)
             if found:
                 return cached
@@ -170,18 +233,17 @@ def wrap_execute_activity(
             raise GraphInterrupt(output.langgraph_interrupts)
 
         result = output.result
+        cached = result
         if output.langgraph_command is not None:
-            cmd = output.langgraph_command
-            result = Command(
-                graph=cmd["graph"],
-                update=cmd["update"],
-                resume=cmd["resume"],
-                goto=cmd["goto"],
-            )
+            result = _command_from_payload(output.langgraph_command)
+            cached = output.langgraph_command
 
         # Store in cache for future continue-as-new cycles.
         if task_id:
-            cache_put(key, result)
+            cache_put(
+                f"{key}:command" if output.langgraph_command is not None else key,
+                cached,
+            )
 
         return result
 
