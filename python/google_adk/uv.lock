@@ -1,5 +1,5 @@
 version = 1
-revision = 3
+revision = 5
 requires-python = ">=3.10"
 resolution-markers = [
     "python_full_version >= '3.14' and sys_platform == 'win32'",
@@ -895,7 +895,7 @@ wheels = [
 
 [[package]]
 name = "google-adk"
-version = "2.9.2"
+version = "2.10.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "aiosqlite" },
@@ -922,9 +922,9 @@ dependencies = [
     { name = "watchdog" },
     { name = "websockets" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/db/08/7ac5e31305b9c0e1714af8ea8c1a5df16e980090eed5e5e456dc8fe5b583/google_adk-2.9.2.tar.gz", hash = "sha256:9d4b91a3cc3a52a471ca5831127e4c46ac174da0db519b4d157a09011737da10", size = 4002237, upload-time = "2026-09-18T18:10:46.112Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/a1/2e/3f5a2ed6b50da6c4420ddc4fbc9f2be0fc2ba2e25b83345b622fcdf8a033/google_adk-2.10.0.tar.gz", hash = "sha256:9e8d64f18e91780e70bf32726250595a9ca38fc8d51d90750f7a71b44922432f", size = 4127907, upload-time = "2026-09-25T19:02:06.67Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/23/a6/e375f8a124e28f31c0cd0f9ff8607d7bdc652f8ce4bc67c39863353b4c6d/google_adk-2.9.2-py3-none-any.whl", hash = "sha256:ad887aadff34ebfe06586ded2b04848413c8bed6d6c7dd14dc7485ec7e54b2d2", size = 4631024, upload-time = "2026-09-18T18:10:43.492Z" },
+    { url = "https://files.pythonhosted.org/packages/29/8b/ae4a9750874ec35e4d88c2a8fd416884cb0695141691689e5affcaad17a7/google_adk-2.10.0-py3-none-any.whl", hash = "sha256:7550fecbb428a8a6de15ab88ba3c1d4704c752fe0b5594dc6d67ff440f370886", size = 4792014, upload-time = "2026-09-25T19:02:04.233Z" },
 ]
 
 [package.optional-dependencies]
@@ -1763,7 +1763,7 @@ wheels = [
 
 [[package]]
 name = "openinference-instrumentation-google-adk"
-version = "0.1.28"
+version = "1.0.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "openinference-instrumentation" },
@@ -1774,9 +1774,9 @@ dependencies = [
     { name = "typing-extensions" },
     { name = "wrapt" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/61/a3/4792b4daf0eb74c64a2f9fbb1a7ad0a750fc504c93b429a4d33760865893/openinference_instrumentation_google_adk-0.1.28.tar.gz", hash = "sha256:7729d852fd1bb23bb38465599681c03e6cf39b9f014fbc9da2d8ef0bdbd66f5b", size = 19079, upload-time = "2026-09-15T04:52:21.989Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/0e/6b/dbefb69761ddce0528b35189a87224ccf834321361458d9349505029ff73/openinference_instrumentation_google_adk-1.0.0.tar.gz", hash = "sha256:3dfe53e3a2ecc9dc06b1bc1add0c06c8e37290617ec10d699966186dc5c7c61e", size = 18400, upload-time = "2026-09-29T18:17:02.234Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/34/e3/c9ce7f564e3fe5b185ad0bdb84e6eea07e919590e9b3149979421ad094a6/openinference_instrumentation_google_adk-0.1.28-py3-none-any.whl", hash = "sha256:baede62c35d49547f0b074fd3a5d1c062434d928b7d5dca98d9b9ca1ed8d0519", size = 21278, upload-time = "2026-09-15T04:52:20.774Z" },
+    { url = "https://files.pythonhosted.org/packages/52/bf/99a0889c90c61dd0557d36f56d3a5b0602c62ff133a5d9608b28d9acb08a/openinference_instrumentation_google_adk-1.0.0-py3-none-any.whl", hash = "sha256:df697b35d8d82e53eee1df17dfc60c6d7430c2fb17e58d6bdf0a4452d2c2b769", size = 20566, upload-time = "2026-09-29T18:17:00.923Z" },
 ]
 
 [[package]]
@@ -3041,8 +3041,8 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "google-adk", specifier = ">=2.8.0,<3" },
-    { name = "google-adk", extras = ["mcp"], marker = "extra == 'mcp'", specifier = ">=2.8.0,<3" },
+    { name = "google-adk", specifier = ">=2.10.0,<3" },
+    { name = "google-adk", extras = ["mcp"], marker = "extra == 'mcp'", specifier = ">=2.10.0,<3" },
     { name = "google-genai", specifier = ">=2.21.0,<3" },
     { name = "opentelemetry-api", specifier = ">=1.40.0,<2" },
     { name = "opentelemetry-sdk", specifier = ">=1.40.0,<2" },
@@ -3054,10 +3054,10 @@ provides-extras = ["mcp"]
 [package.metadata.requires-dev]
 dev = [
     { name = "basedpyright", specifier = "==1.34.0" },
-    { name = "google-adk", extras = ["mcp"], specifier = ">=2.8.0,<3" },
+    { name = "google-adk", extras = ["mcp"], specifier = ">=2.10.0,<3" },
     { name = "litellm", specifier = ">=1.83.0" },
     { name = "mypy", specifier = "==1.18.2" },
-    { name = "openinference-instrumentation-google-adk", specifier = ">=0.1.11" },
+    { name = "openinference-instrumentation-google-adk", specifier = ">=1.0.0" },
     { name = "pydocstyle", specifier = ">=6.3,<7" },
     { name = "pyright", specifier = "==1.1.403" },
     { name = "pytest", specifier = "~=9.0" },
