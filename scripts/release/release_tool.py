@@ -7,6 +7,7 @@ Subcommands:
                                 exact-version re-runs allowed for recovery)
   verify-index-files            prove the files an index serves for a version are the local artifacts
   check-recovery-run            validate a tagged run's tested artifacts for publication recovery
+  check-java-stage-recovery      prevent another upload when a prior staging attempt may have uploaded
   check-published-release       verify the published GitHub release and emit its deployment URL
   check-go-vanity               verify the Go vanity path routes to this plugin's subdirectory
   verify-go-module              compare public Go module bytes and build a clean consumer
@@ -21,8 +22,8 @@ Policy (AGENTS.md, "Release runbook"):
   * TestPyPI versions move forward too, except that its newest version may be re-run
   * final (non pre-release) versions additionally require plugin.toml
     [release] allow-final = true and no TRANSITION(sdk-cutover) markers in the plugin
-  * Python versions are canonical PEP 440; Go versions are canonical SemVer
-    without build metadata (+...)
+  * Python versions are canonical PEP 440; Java versions are X.Y.Z[-RCN];
+    Go versions are canonical SemVer; local versions and build metadata (+...) are forbidden
 """
 
 from __future__ import annotations
@@ -38,6 +39,7 @@ import time
 import tomllib
 import urllib.error
 import urllib.request
+import xml.etree.ElementTree as ET
 from pathlib import Path
 from urllib.parse import quote
 
@@ -47,6 +49,8 @@ from go_release import GoReleaseError, GoVersion, check_vanity, fetch_versions, 
 
 # \Z (not $) so a trailing newline cannot ride along into GITHUB_OUTPUT.
 TAG_RE = re.compile(r"^(?P<language>python|typescript|java|go)/(?P<plugin>[a-z0-9][a-z0-9_.-]*)/v(?P<version>.+)\Z")
+JAVA_VERSION_RE = re.compile(r"(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)(?:-RC[1-9][0-9]*)?\Z")
+MAVEN_CENTRAL = "https://repo.maven.apache.org/maven2"
 REGISTRY_JSON = {
     "pypi": "https://pypi.org/pypi/{coordinate}/json",
     "testpypi": "https://test.pypi.org/pypi/{coordinate}/json",
@@ -106,7 +110,10 @@ def release_version(language: str, raw: str) -> Version | GoVersion:
         raise PolicyError(f"tag version {raw!r} is not PEP 440: {exc}") from exc
     if version.local is not None:
         raise PolicyError(f"tag version {raw!r} must not have a local segment")
-    if str(version) != raw:
+    if language == "java":
+        if not JAVA_VERSION_RE.fullmatch(raw):
+            raise PolicyError(f"Java version {raw!r} must be X.Y.Z or X.Y.Z-RCN (for example 0.1.0-RC1)")
+    elif str(version) != raw:
         raise PolicyError(f"tag version {raw!r} is not canonical PEP 440 (expected {version})")
     return version
 
@@ -188,6 +195,10 @@ def fetch_published_versions(coordinate: str, registry: str, registry_json: Path
     """Return every published version (yanked included). 404 -> []. Anything else fails closed."""
     if registry == "goproxy":
         return fetch_versions(coordinate, registry_json)
+    if registry == "maven":
+        return fetch_maven_versions(coordinate, registry_json)
+    if registry not in REGISTRY_JSON:
+        raise PolicyError(f"unsupported release registry {registry!r}")
     data = _fetch_json(REGISTRY_JSON[registry].format(coordinate=coordinate), registry_json)
     if not data:
         return []
@@ -198,6 +209,33 @@ def fetch_published_versions(coordinate: str, registry: str, registry_json: Path
         except InvalidVersion:
             continue
     return versions
+
+
+def fetch_maven_versions(coordinate: str, local: Path | None = None) -> list[Version]:
+    """Read the public Maven Central version list, including published candidates."""
+    if not re.fullmatch(r"[a-zA-Z0-9_.-]+:[a-zA-Z0-9_.-]+", coordinate):
+        raise PolicyError(f"invalid Maven coordinate {coordinate!r}")
+    group, artifact = coordinate.split(":")
+    url = f"{MAVEN_CENTRAL}/{group.replace('.', '/')}/{artifact}/maven-metadata.xml"
+    try:
+        if local is not None:
+            if not local.is_file():
+                return []
+            payload = local.read_bytes()
+        else:
+            with urllib.request.urlopen(url, timeout=30) as response:  # noqa: S310
+                payload = response.read()
+        root = ET.fromstring(payload)
+        raw_versions = root.findall("./versioning/versions/version")
+        if not raw_versions:
+            raise PolicyError("Maven metadata has no version list; refusing to guess")
+        return [Version(entry.text or "") for entry in raw_versions]
+    except urllib.error.HTTPError as exc:
+        if exc.code == 404:
+            return []
+        raise PolicyError(f"Maven Central returned HTTP {exc.code}; refusing to guess") from exc
+    except (urllib.error.URLError, TimeoutError, ET.ParseError, InvalidVersion) as exc:
+        raise PolicyError(f"cannot read Maven Central versions ({exc}); refusing to guess") from exc
 
 
 def check_policy(version: Version | GoVersion, maturity: str, published: list[Version] | list[GoVersion]) -> str | None:
@@ -259,7 +297,10 @@ def cmd_check_version_policy(args: argparse.Namespace) -> int:
     coordinate = meta["plugin"]["coordinate"]
     maturity = meta["plugin"]["maturity"]
     registry = meta["plugin"].get("registry", "pypi")
-    version = release_version("go" if registry == "goproxy" else "python", args.version)
+    if registry == "maven" and not JAVA_VERSION_RE.fullmatch(args.version):
+        raise PolicyError("Maven release versions must be X.Y.Z or X.Y.Z-RCN")
+    language = {"goproxy": "go", "maven": "java"}.get(registry, "python")
+    version = release_version(language, args.version)
     published = fetch_published_versions(coordinate, registry, Path(args.registry_json) if args.registry_json else None)
     # A Go tag is already public when this job starts. A proxy listing containing
     # only this tag must still satisfy the first-release policy.
@@ -268,7 +309,7 @@ def cmd_check_version_policy(args: argparse.Namespace) -> int:
     rerun = check_policy(version, maturity, published)
     if rerun:
         print(f"::warning::{rerun}")
-    print(f"OK: {coordinate} {version} satisfies the version policy (published: {[str(v) for v in sorted(published)] or 'none'})")
+    print(f"OK: {coordinate} {args.version} satisfies the version policy (published: {[str(v) for v in sorted(published)] or 'none'})")
     if registry == "pypi" and (args.check_testpypi or args.testpypi_json):
         # Every release is staged on TestPyPI first and uploads are immutable, so a re-run finds the
         # version already there and skip-existing keeps the upload from failing. That is the normal
@@ -455,9 +496,13 @@ def release_notes(repo_root: Path, plugin_dir: str, tag: str, repo: str) -> str:
         lines += [
             "## Pre-release notes",
             "",
-            "- This pre-release is published to **TestPyPI only** to validate the release pipeline.",
+            ("- This candidate is privately staged and validated in **Maven Central Portal**; it is not published to Maven Central."
+             if parts["language"] == "java" else
+             "- This pre-release is published to **TestPyPI only** to validate the release pipeline."),
         ]
-        if not meta.get("release", {}).get("allow-final", False):
+        if parts["language"] == "java" and not meta.get("release", {}).get("allow-final", False):
+            lines += ["- Final publication remains blocked until the SDK publishing cutover is complete."]
+        elif not meta.get("release", {}).get("allow-final", False):
             # Only a plugin the SDK still bundles shares files with it.
             lines += [
                 f"- Do **not** install it alongside a `temporalio` release that still embeds `{root_api or coordinate}`; both distributions "
@@ -480,6 +525,45 @@ def cmd_release_notes(args: argparse.Namespace) -> int:
 
 def _gh(*args: str, input_text: str | None = None) -> str:
     return subprocess.run(["gh", *args], check=True, capture_output=True, text=True, input=input_text).stdout
+
+
+JAVA_STAGE_JOB = "Sign, privately stage and verify"
+JAVA_STAGE_STEP = "Stage tested bytes, prove staged files and install a clean consumer"
+
+
+def java_stage_recovery_only(repo: str, run_id: int, run_attempt: int, event: str) -> bool:
+    """Allow an initial upload only when no earlier attempt could have staged it."""
+    if run_id <= 0 or run_attempt <= 0 or event not in {"push", "workflow_dispatch"}:
+        raise PolicyError("expected a Java release push or dispatch with a positive run ID and attempt")
+    if event == "workflow_dispatch":
+        return True
+    # A later attempt may have failed to restore state and skipped staging. Check
+    # every earlier attempt so that this cannot hide the original upload.
+    for attempt in range(1, run_attempt):
+        pages = json.loads(_gh("api", f"repos/{repo}/actions/runs/{run_id}/attempts/{attempt}/jobs?per_page=100",
+                               "--paginate", "--slurp"))
+        jobs = [job for page in pages for job in page["jobs"]]
+        if not jobs:
+            raise PolicyError("cannot verify prior staging jobs; inspect Portal before retrying")
+        for job in jobs:
+            if job["name"] != JAVA_STAGE_JOB:
+                continue
+            if job.get("status") == "completed" and job.get("conclusion") == "skipped":
+                continue
+            staging = [step for step in job.get("steps", []) if step["name"] == JAVA_STAGE_STEP]
+            if (job.get("status") != "completed" or len(staging) != 1
+                or staging[0].get("status") != "completed" or staging[0].get("conclusion") != "skipped"):
+                return True
+    return False
+
+
+def cmd_check_java_stage_recovery(args: argparse.Namespace) -> int:
+    recover_only = java_stage_recovery_only(args.repo or _repo(), args.run_id, args.run_attempt, args.event)
+    _write_outputs(args.github_output, {
+        "recover_only": str(recover_only).lower(),
+        "restore_state": str(recover_only and args.event == "push").lower(),
+    })
+    return 0
 
 
 def check_recovery_run(repo_root: Path, repo: str, tag: str, run_id: int) -> None:
@@ -684,7 +768,7 @@ def main(argv: list[str] | None = None) -> int:
     p = sub.add_parser("check-version-policy", help="enforce the version policy")
     p.add_argument("--plugin-dir", required=True)
     p.add_argument("--version", required=True)
-    p.add_argument("--registry-json", default=None, help="read published versions from this file instead of the registry (tests)")
+    p.add_argument("--registry-json", default=None, help="read registry JSON (or Maven metadata XML) from this file instead of the network (tests)")
     p.add_argument(
         "--check-testpypi",
         action="store_true",
@@ -721,6 +805,14 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--repo", default=None)
     p.add_argument("--github-output", default=os.environ.get("GITHUB_OUTPUT"))
     p.set_defaults(func=cmd_check_recovery_run)
+
+    p = sub.add_parser("check-java-stage-recovery", help="require recovery if an earlier Java staging attempt may have uploaded")
+    p.add_argument("--run-id", type=int, required=True)
+    p.add_argument("--run-attempt", type=int, required=True)
+    p.add_argument("--event", choices=("push", "workflow_dispatch"), required=True)
+    p.add_argument("--repo", default=None)
+    p.add_argument("--github-output", default=os.environ.get("GITHUB_OUTPUT"))
+    p.set_defaults(func=cmd_check_java_stage_recovery)
 
     p = sub.add_parser("check-published-release", help="verify a published GitHub release and emit its URL")
     p.add_argument("--tag", required=True)
