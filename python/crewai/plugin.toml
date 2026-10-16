@@ -1,0 +1,22 @@
+# Schema: ../../AGENTS.md#repository-invariants
+
+[plugin]
+name = "crewai"
+language = "python"
+coordinate = "temporalio-crewai"
+registry = "pypi"
+root-api = "temporalio.crewai"
+maturity = "pre-release"
+docs = "https://docs.temporal.io/develop/python/integrations/crewai"
+
+[release]
+allow-final = true
+
+[ci]
+# crewai pulls in chromadb, whose pydantic.v1 compat shim isn't usable on
+# Python 3.14 yet (ConfigError: unable to infer type for attribute
+# "chroma_server_nofile"). Narrow the max version until that's fixed upstream.
+runtime-versions = ["3.10", "3.13"]
+
+[smoke]
+imports = ["temporalio.crewai._activity", "temporalio.crewai._plugin"]
